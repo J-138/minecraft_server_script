@@ -6,7 +6,7 @@ import time
 import os
 
 # Start the Minecraft server as a subprocess
-server_jar = 'server.jar'
+server_jar = 'server.jar' # <-- change this to the name of your server jar
 minecraft_server_process = subprocess.Popen(['java', 
                                              '-jar', 
                                              server_jar,
@@ -15,7 +15,7 @@ minecraft_server_process = subprocess.Popen(['java',
                                              stdout=subprocess.PIPE, 
                                              stderr=subprocess.PIPE, 
                                              universal_newlines=True)
-
+ 
 # Sends input to mc server process
 def send_command(p, user_command: str) -> None:
     p.stdin.write(user_command + '\n')
@@ -51,7 +51,8 @@ def find_dir_size(dir_name: str) -> int:
 
 # Variables for backing up world
 exit_event = threading.Event()
-TIME_BETWEEN_BACKUPS = 1200 # How often backups are make, in seconds
+TIME_BETWEEN_BACKUPS = 15 #3600 * 24 # How often backups are make, in seconds
+ZIP_WORLD = True
 
 # Create backup world
 def backup_world():
@@ -68,11 +69,23 @@ def backup_world():
                         dst_dir,
                         ignore=shutil.ignore_patterns('*.lock'))
         
-        print(f"Backup completed")
         world_size = find_dir_size(dst_dir)
         bu_msg = f'World backed up on: {curr_time}, current world size: {world_size}'
         send_command(minecraft_server_process, f'/say {bu_msg}')
-    
+        print(f"Backup completed")
+
+        if ZIP_WORLD:
+            zip_dir = dst_dir + '_zipped'
+            shutil.make_archive(zip_dir, 'zip', dst_dir)
+            zipped_world_size = os.path.getsize(zip_dir + '.zip')
+            saved_space = round(zipped_world_size / world_size * 100, 0)
+            print(f'Zipped world backup, now taking up {saved_space}% amount of original space')
+
+            try:
+                shutil.rmtree(dst_dir)
+            except OSError as e:
+                print(f"Backup zipping failed. An error occurred: {e}")
+
     except Exception as e:
         print(f"Backup failed. An error occurred: {e}")
         send_command(minecraft_server_process, '/say World backup failed')
