@@ -16,6 +16,58 @@ minecraft_server_process = subprocess.Popen(['java',
                                              stderr=subprocess.PIPE, 
                                              universal_newlines=True)
  
+# Class that represents settings for backup such as time between backups
+class BackupSettings:
+    def __init__(self) -> None:
+        self.time_between_backups = 24 * 60 * MINUTE
+        self.zip_world = True
+
+    def set_time_between_backups(self, tbb: str) -> None:
+        self.time_between_backups = tbb
+
+    def set_zip(self, b: bool) -> None:
+        self.zip_world = b
+
+# Variables running threads
+exit_event = threading.Event()
+MINUTE = 60 # constant for backup calculation
+super_users = []
+backup_settings = BackupSettings()
+
+# Handles commands send from the terminal or from super user
+def handle_user_commands(command: str) -> None:
+    if command.startswith('!su '):
+        name = command[4:].upper()
+
+        if name in super_users:
+            print('User is already a super user')
+        else:
+            super_users.append(name)
+
+    elif command.startswith('!list'):
+        print('Super users:')
+        for su in super_users:
+            print(su)
+
+    elif command.startswith('!tbb '):
+        tbb = int(command[5:])
+        backup_settings.set_time_between_backups(tbb * MINUTE)
+        message = f'Time between backups set to: {backup_settings.time_between_backups} seconds'
+        send_command(minecraft_server_process, f'/say {message}')
+        print(message)
+            
+    elif command.startswith('!tbbs '):
+        tbb = int(command[6:])
+        backup_settings.set_time_between_backups(tbb)
+        message = f'Time between backups set to: {backup_settings.time_between_backups} seconds'
+        send_command(minecraft_server_process, f'/say {message}')
+        print(message)
+
+    elif command.startswith('!bu'):
+        backup_world()
+
+    return
+
 # Sends input to mc server process
 def send_command(p, user_command: str) -> None:
     p.stdin.write(user_command + '\n')
@@ -24,12 +76,21 @@ def send_command(p, user_command: str) -> None:
 # Function for user input thread
 def user_input_thread():
     while True:
-        user_input = input()
+        try:
+            user_input = input()
 
-        if user_input.upper() == 'Q' or exit_event.is_set():
+            if exit_event.is_set():
+                break
+
+            if user_input.upper() == 'Q':
+                break
+            elif user_input.startswith('!'):
+                handle_user_commands(user_input)
+            else:
+                send_command(minecraft_server_process, user_input)
+
+        except EOFError:
             break
-
-        send_command(minecraft_server_process, user_input)
 
     print('closing user input thread')
 
@@ -49,11 +110,6 @@ def find_dir_size(dir_name: str) -> int:
     
     return size
 
-# Variables for backing up world
-exit_event = threading.Event()
-TIME_BETWEEN_BACKUPS = 15 #3600 * 24 # How often backups are make, in seconds
-ZIP_WORLD = True
-
 # Create backup world
 def backup_world():
     curr_time = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
@@ -65,6 +121,8 @@ def backup_world():
         print('Created \'./world_backups\' directory')
     
     try:
+        _, _ = minecraft_server_process.communicate(timeout=60)
+
         shutil.copytree('./world',
                         dst_dir,
                         ignore=shutil.ignore_patterns('*.lock'))
@@ -74,7 +132,7 @@ def backup_world():
         send_command(minecraft_server_process, f'/say {bu_msg}')
         print(f"Backup completed")
 
-        if ZIP_WORLD:
+        if backup_settings.zip_world:
             zip_dir = dst_dir + '_zipped'
             shutil.make_archive(zip_dir, 'zip', dst_dir)
             zipped_world_size = os.path.getsize(zip_dir + '.zip')
@@ -95,7 +153,7 @@ def check_backup_thread():
     last_backup_time = time.time()
 
     while True:
-        if (time.time() - last_backup_time) >= TIME_BETWEEN_BACKUPS:
+        if (time.time() - last_backup_time) >= backup_settings.time_between_backups:
             backup_world()
             last_backup_time = time.time()
             time.sleep(10)
@@ -126,30 +184,43 @@ def write_output_to_txt(curr_date, output: str) -> None:
     return
 
 # Read the output of the server
-while True:
-    server_output = minecraft_server_process.stdout.readline()
+try:
+    while True:
+        server_output = minecraft_server_process.stdout.readline().strip()
 
-    if not server_output and minecraft_server_process.poll() is not None:
-        break
+        if not server_output or minecraft_server_process.poll() is not None:
+            print('server output read not valid or poll')
+            break
 
-    curr_date = datetime.datetime.now().date()
+        curr_date = datetime.datetime.now().date()
 
-    print(f"MCServerP@{curr_date}: {server_output.strip()}")
-    write_output_to_txt(curr_date, server_output)
+        print(f"MCServerP@{curr_date}: {server_output.strip()}")
+        write_output_to_txt(curr_date, server_output)
 
-    if 'Gave' in server_output and 'TNT' in server_output:
-        send_command(minecraft_server_process, '/say Use the TNT wisely')
+        if 'Gave' in server_output and 'TNT' in server_output:
+            send_command(minecraft_server_process, '/say Use the TNT wisely')
 
-# Close stream and wait for server p to close
-minecraft_server_process.stdin.close()
-minecraft_server_process.wait()
-return_code = minecraft_server_process.returncode
-print(f"Minecraft server process exited with return code: {return_code}")
+        elif '<' in server_output and '>' in server_output:
+            user_name = server_output.split()[3].replace('<', '')
+            user_name = user_name.replace('>', '')
 
-# Sets flag and waits for threads to close
-exit_event.set()  # set event flag to close threads
-print('Server process has shut down, enter [Q] to exit')
-input_thread.join()
-backup_thread.join()
+            if user_name.upper() in super_users and '!' in server_output:
+                handle_user_commands(server_output[server_output.index('!'):])
+
+except KeyboardInterrupt:
+    print('Keyboard interrupt, cleaning and exiting')
+
+finally:
+    # Close stream and wait for server p to close
+    minecraft_server_process.stdin.close()
+    minecraft_server_process.wait()
+    return_code = minecraft_server_process.returncode
+    print(f"Minecraft server process exited with return code: {return_code}")
+
+    # Sets flag and waits for threads to close
+    exit_event.set()  # set event flag to close threads
+    print('Server process has shut down, enter [Q] to exit')
+    input_thread.join()
+    backup_thread.join()
 
 exit()
